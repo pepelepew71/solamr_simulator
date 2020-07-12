@@ -1,4 +1,4 @@
-#! /usr/bin/env python 
+#! /usr/bin/env python
 
 # Generate random path for diff drive
 from math import atan2, exp, sqrt, log
@@ -11,7 +11,8 @@ import rospy
 import tf.transformations as t
 from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped, Twist
-
+from geometry_msgs.msg import Point
+from visualization_msgs.msg import Marker, MarkerArray
 
 class LinkedDrive:
 
@@ -35,7 +36,7 @@ class LinkedDrive:
         self.front_th = 0.0
         self.front_vel = [0.0, 0.0]  # [v_linear, w_angular]
         self.front_predict_vel = [0.0, 0.0]  # [v_linear, w_angular]
-        
+
         ''' variables and params of REAR car '''
         self.INIT_X = - self.L
         self.INIT_Y = 0.0
@@ -62,7 +63,7 @@ class LinkedDrive:
         ''' update x, y coordinate '''
         self.front_pose[0] = data.pose.pose.position.x
         self.front_pose[1] = data.pose.pose.position.y
-        
+
         ''' update vels '''
         self.front_vel[0] = data.twist.twist.linear.x
         self.front_vel[1] = data.twist.twist.angular.z
@@ -79,7 +80,7 @@ class LinkedDrive:
         ''' update x, y coordinate '''
         self.cur_pose[0] = data.pose.pose.position.x
         self.cur_pose[1] = data.pose.pose.position.y
-        
+
         ''' update quaternion '''
         self.cur_ori[0] = data.pose.pose.orientation.x
         self.cur_ori[1] = data.pose.pose.orientation.y
@@ -102,21 +103,21 @@ class LinkedDrive:
         else:
             r = vel[0] / omega
             ''' pose of end of arc before rotation '''
-            d_x = r * np.sin(omega * self.dt) 
-            d_y = r - r * np.cos(omega * self.dt) 
+            d_x = r * np.sin(omega * self.dt)
+            d_y = r - r * np.cos(omega * self.dt)
 #        print("d_x, d_y in predict={0}".format([d_x, d_y]))
         ''' rotate for the theta '''
         PI = np.pi
         rot_mat = np.array([[np.cos(th0), - np.sin(th0)],
                             [np.sin(th0), np.cos(th0)]])
         [[x1], [y1]] = [[x0], [y0]] + np.dot(rot_mat, [[d_x], [d_y]])
-        th1 = th0 + omega * self.dt 
+        th1 = th0 + omega * self.dt
 #        print("\ncurrent : {0}".format([f_x_0, f_y_0]))
 #        print("\ncurrent vel : {0}".format(self.front_vel))
 #        print("\npredicted : {0}".format([f_x_1, f_y_1]))
-        
+
         return [x1, y1, th1]
-        
+
     def get_potential_poses(self):
         ''' return potential locations (poses) for follower to be at '''
         res = self.ANG_RES # rad, potential poses every __ rad
@@ -129,6 +130,8 @@ class LinkedDrive:
         lst_poses = []
         for th in lst_rad:
             lst_poses.append([x + self.L * np.cos(th), y + self.L * np.sin(th)])
+        m_arr = get_marker_array(lst_poses)
+        PUB_MARKER_ARRAY.publish(m_arr)
         return lst_poses
 
     def vels_from_pose(self, poses):
@@ -151,7 +154,7 @@ class LinkedDrive:
 
 #            print("pose={0}; v and w={1}; check_result={2}; dxdy={3}".format(pose, [v,w], self.check_vels_range([v,w]), [dx,dy]))
             temp_pose = self.pose_update(self.cur_pose, [v,w], self.cur_th)[:2]
-            if self.check_vels_range([v, w]) and self.dist2pose(temp_pose, pose) < 0.01: 
+            if self.check_vels_range([v, w]) and self.dist2pose(temp_pose, pose) < 0.01:
                 dict_reachable[tuple(pose)] = [v, w]
 
         return dict_reachable
@@ -177,7 +180,7 @@ class LinkedDrive:
 
         if flag == 0: return True
         else: return False
-        
+
     def pointAngularDiff(self, goal):
         x_diff = goal[0] - self.cur_pose[0]
         y_diff = goal[1] - self.cur_pose[1]
@@ -197,22 +200,22 @@ class LinkedDrive:
         elif abs(theta_diff) < THETA_TOL*11 : RATE_ang*=0.5
         ''' turn CW or CCW '''
         if theta_diff > 0:
-            if theta_diff > PI: 
-                ang_temp =  - RATE_ang * exp(2*PI - theta_diff) 
-            else : 
+            if theta_diff > PI:
+                ang_temp =  - RATE_ang * exp(2*PI - theta_diff)
+            else :
                 ang_temp =  RATE_ang * exp(theta_diff)
         if theta_diff < 0:
-            if abs(theta_diff) > PI: 
-                ang_temp = RATE_ang * exp(2*PI + theta_diff) 
-            else : 
+            if abs(theta_diff) > PI:
+                ang_temp = RATE_ang * exp(2*PI + theta_diff)
+            else :
                 ang_temp = - RATE_ang * exp(- theta_diff)
         if abs(ang_temp) >= MAX_OMEGA: ang_temp = MAX_OMEGA * abs(ang_temp)/ang_temp
 #        elif abs(ang_temp) <= MIN_OMEGA: ang_temp = MIN_OMEGA * abs(ang_temp)/ang_temp
         return ang_temp
-    
+
     def faceSameDir(self, goal):
         ''' Decide to drive forward or backward '''
-        if abs(self.pointAngularDiff(goal)) < PI/2 or abs(self.pointAngularDiff(goal)) > PI*3/2 : 
+        if abs(self.pointAngularDiff(goal)) < PI/2 or abs(self.pointAngularDiff(goal)) > PI*3/2 :
             return True # same dir, drive forward
         else : return False # opposite dir, drive reverse
 
@@ -221,9 +224,9 @@ class LinkedDrive:
 
     def linearVel(self, goal, RATE_lin=0.5):
         dist = self.dist2pose(self.cur_pose, goal)
-        if self.faceSameDir(goal) : 
+        if self.faceSameDir(goal) :
             vel_temp = RATE_lin * log(dist+1)
-        elif not self.faceSameDir(goal) : 
+        elif not self.faceSameDir(goal) :
             vel_temp = - RATE_lin * log(dist+1)
         ''' MIN and MAX '''
         if abs(vel_temp) >= self.LIN_VEL[1]: vel_temp = self.LIN_VEL[1] * abs(vel_temp)/vel_temp
@@ -237,13 +240,13 @@ class LinkedDrive:
 
     def rate_ori(self, target_pose, mode="shelft"):
         ''' rate the orientation, standatd: 1.shelft orientation, 2.front car orientation '''
-        
+
         ''' 1.rate by shelft orientation '''
 
         ''' 2.rate by front car orientation '''
 
         pass
-    
+
     def pose_optimization(self):
         ''' return optimized pose from reachable poses '''
         potential_poses = self.get_potential_poses()
@@ -257,12 +260,12 @@ class LinkedDrive:
             for p, v in dict_reachable.items():
                 ''' 1. dist to target (initiallizing the dict) '''
                 dict_cost[str(v)] = [self.rate_dist(p)]
-            
-            vels, cost = sorted(dict_cost.items(), key=lambda item: item[1][0], reverse=False)[0]  
+
+            vels, cost = sorted(dict_cost.items(), key=lambda item: item[1][0], reverse=False)[0]
 #            print(sorted(dict_cost.items(), key=lambda item: item[1][0], reverse=False)[0]  )
 #            print(vels)
             return eval(vels)
-        
+
         else :
             dist2front = self.dist2pose(self.front_pose, self.cur_pose)
             ''' facing toward front car '''
@@ -278,13 +281,39 @@ class LinkedDrive:
 
             return [lin_vel, ang_vel]
 
+def get_marker_points():
+    m = Marker()
+    m.header.frame_id = "/solamr_1/odom"
+    m.header.stamp = rospy.Time.now()
+    m.ns = "/"
+    m.id = 0
+    m.action = m.ADD
+    m.type = m.POINTS
+    m.pose.orientation.w = 1.0
+    m.scale.x = 0.02
+    m.scale.y = 0.02
+    m.color.g = 1.0
+    m.color.a = 1.0
+    return m
 
+def get_marker_array(locs):
+    marker_array = MarkerArray()
+    points = get_marker_points()
+    for loc in locs:
+        p1 = Point()
+        p1.x = loc[0]
+        p1.y = loc[1]
+        p1.z = 0.0
+        points.points.append(p1)
+    marker_array.markers.append(points)
+    return marker_array
 
 if __name__ == '__main__':
 
     try:
         solamr_2 = LinkedDrive()
         rospy.init_node('linked_drive')
+        PUB_MARKER_ARRAY = rospy.Publisher(name="visualization_marker_array", data_class=MarkerArray, queue_size=1)
         rate = rospy.Rate(solamr_2.RATE)
         while not rospy.is_shutdown():
 
@@ -303,7 +332,7 @@ if __name__ == '__main__':
             ''' update follower pose '''
             optimized_vels = solamr_2.pose_optimization()
 
-            _twist = Twist()    
+            _twist = Twist()
             _twist.linear.x = optimized_vels[0]
             _twist.angular.z = optimized_vels[1]
             solamr_2.r_vel_pub.publish(_twist)
