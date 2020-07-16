@@ -1,17 +1,15 @@
 #! /usr/bin/env python
 
-from math import atan2, exp, sqrt, log
-from math import pi as PI
+import math
+import threading
+
 import numpy as np
-import copy
-import time
 
 import rospy
-import tf.transformations as t
-from nav_msgs.msg import Path, Odometry
-from geometry_msgs.msg import PoseStamped, Twist
-
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Twist, Point
+from nav_msgs.msg import Odometry
+import tf
+import tf2_ros
 from visualization_msgs.msg import Marker, MarkerArray
 
 
@@ -85,14 +83,14 @@ class LinkedDrive:
         x, y, _ = self.get_predict_pose(FRONT_POSE, FRONT_VEL, FRONT_TH)  # from front's current vels
         # x, y, _ = self.get_predict_pose(FRONT_POSE, FRONT_CMD_VEL, FRONT_TH)  # from front's predicted vels
 
-        list_rad = np.arange(0, 2.0*PI, self.angle_resolution) # rad, potential poses every __ rad
+        list_rad = np.arange(0, 2.0*math.pi, self.angle_resolution) # rad, potential poses every __ rad
         # print("potential poses = {0}".format(len(lst_rad)))
         list_poses = []
 
         for th in list_rad:
             list_poses.append([x + self.L * np.cos(th), y + self.L * np.sin(th)])
 
-        m_arr = get_marker_array(list_poses)
+        m_arr = _get_marker_array(list_poses)
         PUB_MARKER_ARRAY.publish(m_arr)
 
         return list_poses
@@ -142,16 +140,13 @@ class LinkedDrive:
         v0, w0 = CUR_VEL
         av, aw = (np.array(vels) - np.array(CUR_VEL)) / self.dt
 
-        if abs(v1) > self.lin_vel_max:
+        if (abs(v1) > self.lin_vel_max or
+            abs(w1) > self.rot_vel_max or
+            abs(av) > self.lin_acc or
+            abs(aw) > self.rot_acc):
             return False
-        if abs(w1) > self.rot_vel_max:
-            return False
-        if abs(av) > self.lin_acc:
-            return False
-        if abs(aw) > self.rot_acc:
-            return False
-
-        return True
+        else:
+            return True
 
     def pointAngularDiff(self, goal):
         '''
@@ -164,7 +159,7 @@ class LinkedDrive:
         '''
         x_diff = goal[0] - CUR_POSE[0]
         y_diff = goal[1] - CUR_POSE[1]
-        theta_goal = atan2(y_diff, x_diff)
+        theta_goal = math.atan2(y_diff, x_diff)
         return theta_goal - CUR_TH
 
     def angularVel(self, point, rate_ang=0.5, backward=True):
@@ -184,8 +179,8 @@ class LinkedDrive:
         theta_diff = self.pointAngularDiff(point)
 
         # -- TEST: see if this can follow better
-        # theta_diff -= PI/8
-        ang_temp = 0.0000000001
+        # theta_diff -= math.pi/8
+        ang_temp = 1e-10
 
         # -- prevent oscilliation
         if abs(theta_diff) < theta_tol*2:
@@ -197,16 +192,16 @@ class LinkedDrive:
 
         # -- turn CW or CCW
         if theta_diff > 0:
-            if theta_diff > PI:
-                ang_temp =  - rate_ang * exp(2*PI - theta_diff)
+            if theta_diff > math.pi:
+                ang_temp =  - rate_ang * math.exp(2*math.pi - theta_diff)
             else :
-                ang_temp =  rate_ang * exp(theta_diff)
+                ang_temp =  rate_ang * math.exp(theta_diff)
 
         if theta_diff < 0:
-            if abs(theta_diff) > PI:
-                ang_temp = rate_ang * exp(2*PI + theta_diff)
+            if abs(theta_diff) > math.pi:
+                ang_temp = rate_ang * math.exp(2*math.pi + theta_diff)
             else :
-                ang_temp = - rate_ang * exp(- theta_diff)
+                ang_temp = - rate_ang * math.exp(- theta_diff)
 
         if abs(ang_temp) >= max_omega:
             ang_temp = max_omega * abs(ang_temp)/ang_temp
@@ -226,10 +221,10 @@ class LinkedDrive:
         Return:
             (bool):
         '''
-        if abs(self.pointAngularDiff(goal)) < PI/2.0 or abs(self.pointAngularDiff(goal)) > PI*3.0/2.0 :
-            return True # same dir, drive forward
+        if abs(self.pointAngularDiff(goal)) < math.pi/2.0 or abs(self.pointAngularDiff(goal)) > math.pi*3.0/2.0 :
+            return True  # same dir, drive forward
         else:
-            return False # opposite dir, drive reverse
+            return False  # opposite dir, drive reverse
 
     def linearVel(self, goal, rate_lin=0.5):
         '''
@@ -244,9 +239,9 @@ class LinkedDrive:
         dist = get_dist_from_two_poses(CUR_POSE, goal)
 
         if self.faceSameDir(goal) :
-            vel_temp = rate_lin * log(dist+1)
+            vel_temp = rate_lin * math.log(dist+1)
         elif not self.faceSameDir(goal) :
-            vel_temp = - rate_lin * log(dist+1)
+            vel_temp = - rate_lin * math.log(dist+1)
         # -- MIN and MAX
         if abs(vel_temp) >= self.lin_vel_max:
             vel_temp = self.lin_vel_max * abs(vel_temp)/vel_temp
@@ -352,6 +347,85 @@ class LinkedDrive:
             pass
 
 
+class TfListener:
+    """
+    Descriptions:
+        tf listener for tf map1 -> car1 and map2 -> car2
+    Args:
+        frames (dict):
+    Attributes:
+        frames (dict):
+        tf_buffer (tf2_ros.Buffer):
+    """
+    def __init__(self, frames):
+        self.frames = frames
+        self.tf_buffer = tf2_ros.Buffer()
+        tf2_ros.TransformListener(self.tf_buffer)  # for buffer
+
+    def _update_front_car(self):
+        """
+        Descriptions:
+            update car1 (front) pose and orientation
+        """
+        try:
+            t = self.tf_buffer.lookup_transform(
+                target_frame=frames["map1_frame_id"],
+                source_frame=frames["car1_frame_id"],
+                time=rospy.Time())
+        except Exception as err:
+            rospy.loginfo(err)
+        else:
+            global FRONT_POSE, FRONT_ORI, FRONT_TH
+            FRONT_POSE[0] = t.transform.translation.x
+            FRONT_POSE[1] = t.transform.translation.y
+            FRONT_ORI[0] = t.transform.rotation.x
+            FRONT_ORI[1] = t.transform.rotation.y
+            FRONT_ORI[2] = t.transform.rotation.z
+            FRONT_ORI[3] = t.transform.rotation.w
+            _, _, FRONT_TH = tf.transformations.euler_from_quaternion(FRONT_ORI)
+
+    def _update_rear_car(self):
+        """
+        Descriptions:
+            update car2 (rear) pose and orientation
+        """
+        try:
+            t = self.tf_buffer.lookup_transform(
+                target_frame=frames["map2_frame_id"],
+                source_frame=frames["car2_frame_id"],
+                time=rospy.Time())
+        except Exception as err:
+            rospy.loginfo(err)
+        else:
+            global CUR_POSE, CUR_ORI, CUR_TH
+            CUR_POSE[0] = t.transform.translation.x
+            CUR_POSE[1] = t.transform.translation.y
+            CUR_ORI[0] = t.transform.rotation.x
+            CUR_ORI[1] = t.transform.rotation.y
+            CUR_ORI[2] = t.transform.rotation.z
+            CUR_ORI[3] = t.transform.rotation.w
+            _, _, CUR_TH = tf.transformations.euler_from_quaternion(CUR_ORI)
+
+    def _job(self):
+        '''
+        Description:
+            loop update pose and orientation of car1 and car2
+        '''
+        rate = rospy.Rate(hz=10.0)
+        while not rospy.is_shutdown():
+            self._update_front_car()
+            self._update_rear_car()
+            rate.sleep()
+
+    def start_thread(self):
+        '''
+        Description:
+            start threading
+        '''
+        thread = threading.Thread(target=self._job, name='job')
+        thread.start()
+
+
 # --
 
 def get_dist_from_two_poses(pose1, pose2):
@@ -366,54 +440,25 @@ def get_dist_from_two_poses(pose1, pose2):
     '''
     return np.sqrt(sum((np.array(pose1) - np.array(pose2))**2))
 
-def _cb_fp_cmdvel(data):
+def _cb_car1_odom(data):
     """
     Descriptions:
-        callback for rospy.Subscriber /solamr_1/cmd_vel
+        callback for rospy.Subscriber car1 odom
     """
-    global FRONT_CMD_VEL
-
-    FRONT_CMD_VEL[0] = data.linear.x
-    FRONT_CMD_VEL[1] = data.angular.z
-
-def _cb_f_pose(data):
-    """
-    Descriptions:
-        callback for rospy.Subscriber /solamr_1/odom
-    """
-    global FRONT_POSE, FRONT_VEL, FRONT_ORI, FRONT_TH
-
-    FRONT_POSE[0] = data.pose.pose.position.x
-    FRONT_POSE[1] = data.pose.pose.position.y
-
+    global FRONT_VEL
     FRONT_VEL[0] = data.twist.twist.linear.x
     FRONT_VEL[1] = data.twist.twist.angular.z
 
-    FRONT_ORI[0] = data.pose.pose.orientation.x
-    FRONT_ORI[1] = data.pose.pose.orientation.y
-    FRONT_ORI[2] = data.pose.pose.orientation.z
-    FRONT_ORI[3] = data.pose.pose.orientation.w
-
-    _, _, FRONT_TH = t.euler_from_quaternion(FRONT_ORI)
-
-def _cb_r_pose(data):
+def _cb_car2_odom(data):
     """
     Descriptions:
-        callback for rospy.Subscriber /solamr_2/odom
+        callback for rospy.Subscriber car2 odom
     """
-    global CUR_POSE, CUR_ORI, CUR_TH
+    global CUR_VEL
+    CUR_VEL[0] = data.twist.twist.linear.x
+    CUR_VEL[1] = data.twist.twist.angular.z
 
-    CUR_POSE[0] = data.pose.pose.position.x
-    CUR_POSE[1] = data.pose.pose.position.y
-
-    CUR_ORI[0] = data.pose.pose.orientation.x
-    CUR_ORI[1] = data.pose.pose.orientation.y
-    CUR_ORI[2] = data.pose.pose.orientation.z
-    CUR_ORI[3] = data.pose.pose.orientation.w
-
-    _, _, CUR_TH = t.euler_from_quaternion(CUR_ORI)
-
-def get_marker_points():
+def _get_marker_points():
     """
     Descritions:
 
@@ -421,7 +466,7 @@ def get_marker_points():
         (Marker):
     """
     m = Marker()
-    m.header.frame_id = "/solamr_1/odom"
+    m.header.frame_id = "map"
     m.header.stamp = rospy.Time.now()
     m.ns = "/"
     m.id = 0
@@ -434,7 +479,7 @@ def get_marker_points():
     m.color.a = 1.0
     return m
 
-def get_marker_array(locs):
+def _get_marker_array(locs):
     """
     Descritions:
 
@@ -444,7 +489,7 @@ def get_marker_array(locs):
         (MarkerArray):
     """
     marker_array = MarkerArray()
-    points = get_marker_points()
+    points = _get_marker_points()
     for loc in locs:
         p = Point()
         p.x = loc[0]
@@ -457,26 +502,46 @@ def get_marker_array(locs):
 if __name__ == '__main__':
 
     # -- global vars
-    FRONT_CMD_VEL = [0.0, 0.0]  # [v_linear, w_angular]
     FRONT_POSE = [0.0, 0.0]  # [x, y]
     FRONT_VEL = [0.0, 0.0]  # [v_linear, w_angular]
     FRONT_ORI = [0.0, 0.0, 0.0, 0.0] # [x, y, z, w]
     FRONT_TH = 0.0
 
-    CUR_POSE = [-1.0, 0.0]  # [x, y]
-    CUR_VEL = [0.0, 0.0]  # [lin, ang]
+    CUR_POSE = [0.0, 0.0]  # [x, y]
+    CUR_VEL = [0.0, 0.0]  # [v_linear, w_angular]
     CUR_ORI = [0.0, 0.0, 0.0, 0.0]  # [x, y, z, w]
     CUR_TH = 0.0
 
-    # -- rosnode
+    # -- ros param
     rospy.init_node('linked_drive')
 
-    rospy.Subscriber(name="/solamr_1/odom", data_class=Odometry, callback=_cb_f_pose)
-    rospy.Subscriber(name="/solamr_1/cmd_vel", data_class=Twist, callback=_cb_fp_cmdvel)
-    rospy.Subscriber(name="/solamr_2/odom", data_class=Odometry, callback=_cb_r_pose)
-    PUB_R_VEL = rospy.Publisher(name='/solamr_2/cmd_vel', data_class=Twist, queue_size=10)
+    map1_frame_id = rospy.get_param(param_name="map1_frame_id", default="map")
+    map2_frame_id = rospy.get_param(param_name="map2_frame_id", default="map")
+    car1_frame_id = rospy.get_param(param_name="car1_frame_id", default="solamr_1/base_footprint")
+    car2_frame_id = rospy.get_param(param_name="car2_frame_id", default="solamr_2/base_footprint")
+
+    car1_odom = rospy.get_param(param_name="car1_odom", default="solamr_1/odom")
+    car2_odom = rospy.get_param(param_name="car2_odom", default="solamr_2/odom")
+
+    car1_cmd_vel = rospy.get_param(param_name="car1_cmd_vel", default="solamr_1/cmd_vel")
+    car2_cmd_vel = rospy.get_param(param_name="car2_cmd_vel", default="solamr_2/cmd_vel")
+
+    # -- ros node function
+    rospy.Subscriber(name=car1_odom, data_class=Odometry, callback=_cb_car1_odom)  # for VEL
+    rospy.Subscriber(name=car2_odom, data_class=Odometry, callback=_cb_car2_odom)  # for VEL
+    PUB_R_VEL = rospy.Publisher(name=car2_cmd_vel, data_class=Twist, queue_size=10)
     PUB_MARKER_ARRAY = rospy.Publisher(name="visualization_marker_array", data_class=MarkerArray, queue_size=1)
 
-    # -- linked_drive
+    # -- tf listener for POSE, ORI and TH
+    frames = {
+        "map1_frame_id": map1_frame_id,
+        "map2_frame_id": map2_frame_id,
+        "car1_frame_id": car1_frame_id,
+        "car2_frame_id": car2_frame_id,
+    }
+    tf_listener = TfListener(frames=frames)
+    tf_listener.start_thread()
+
+    # -- linked drive
     linked_drive = LinkedDrive()
     linked_drive.start()
