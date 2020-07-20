@@ -16,7 +16,7 @@ from linked_drive_marker import MarkerArrPublisher
 class LinkedDrive:
     """
     Attributes:
-        weight_dist (float): weight for distance in optimization obj
+        weight_dist (float): weight coeff. for distance in optimization obj
         dt (float):
         L (float): distance between two solamr when connected with shelft
         dist_error (float):
@@ -62,7 +62,10 @@ class LinkedDrive:
             r = abs(v / w)
             dth = w * self.dt
             dx = abs(r * np.sin(dth))
-            dx = dx if v > 0 else -dx
+            if v > 0:
+                dx = dx
+            else:
+                dx = -dx
             dy = r * (1.0 - np.cos(dth))
 
         # -- use rotation matrix to get predicted x, y in map coordinate
@@ -154,7 +157,7 @@ class LinkedDrive:
         else:
             return True
 
-    def pointAngularDiff(self, goal):
+    def get_diff_theta(self, goal):
         '''
         Args:
             goal (list):
@@ -171,7 +174,7 @@ class LinkedDrive:
         Get angluar velocity for facing toward to the front car.
 
         Args:
-            point (?):
+            point (list):
             rate_ang (float):
             backward (bool):
         Return:
@@ -180,7 +183,7 @@ class LinkedDrive:
         theta_tol = 0.0175  # in radian ~= 2 deg
         max_omega = self.rot_vel_max
         min_omega = 0.1
-        theta_diff = self.pointAngularDiff(point)
+        theta_diff = self.get_diff_theta(point)
 
         # -- TEST: see if this can follow better
         # theta_diff -= np.pi/8
@@ -216,33 +219,33 @@ class LinkedDrive:
 
         return ang_temp
 
-    def faceSameDir(self, goal):
+    def check_face_same_dir(self, goal):
         '''
         Decide to drive forward or backward.
 
         Args:
-            goal (?):
+            goal (list):
         Return:
             (bool):
         '''
-        if abs(self.pointAngularDiff(goal)) < np.pi/2.0 or abs(self.pointAngularDiff(goal)) > np.pi*3.0/2.0 :
+        if abs(self.get_diff_theta(goal)) < np.pi/2.0 or abs(self.get_diff_theta(goal)) > np.pi*3.0/2.0 :
             return True  # same dir, drive forward
         else:
             return False  # opposite dir, drive reverse
 
-    def linearVel(self, goal, rate_lin=0.5):
+    def get_linear_vel(self, goal, rate_lin=0.5):
         '''
         Args:
-            goal (?):
+            goal (list):
             rate_lin (float):
         Return:
             (float):
         '''
         dist = get_dist_from_two_poses(CUR_POSE, goal)
 
-        if self.faceSameDir(goal) :
+        if self.check_face_same_dir(goal) :
             vel_temp = rate_lin * np.log(dist+1)
-        elif not self.faceSameDir(goal) :
+        else:
             vel_temp = - rate_lin * np.log(dist+1)
         # -- MIN and MAX
         if abs(vel_temp) >= self.lin_vel_max:
@@ -255,7 +258,7 @@ class LinkedDrive:
         get the rate of distance between front and follower (closer the lower).
 
         Args:
-            target_pose (?):
+            target_pose (list):
         Return:
             (float):
         '''
@@ -304,7 +307,7 @@ class LinkedDrive:
             ang_vel = self.get_angular_vel(FRONT_POSE)
 
             # -- go straight to 1m away from front vehicle if there is no available vels
-            lin_vel = self.linearVel(FRONT_POSE)
+            lin_vel = self.get_linear_vel(FRONT_POSE)
 
             dist = get_dist_from_two_poses(FRONT_POSE, CUR_POSE)
 
@@ -328,7 +331,7 @@ class LinkedDrive:
                 ros_t0 = rospy.get_time()
 
                 # -- update follower pose
-                rear_vels = linked_drive.get_opt_rear_vels()
+                rear_vels = self.get_opt_rear_vels()
 
                 _twist = Twist()
                 _twist.linear.x = rear_vels[0]
@@ -454,38 +457,42 @@ def _cb_car2_odom(data):
 
 if __name__ == '__main__':
 
+
     # -- global vars
+    ## -- FRONT: car leader
     FRONT_POSE = [0.0, 0.0]  # [x, y]
     FRONT_ORI = [0.0, 0.0, 0.0, 0.0] # [x, y, z, w]
     FRONT_TH = 0.0
     FRONT_VEL = [0.0, 0.0]  # [v_linear, w_angular]
 
+    ## -- CUR: car follower
     CUR_POSE = [0.0, 0.0]  # [x, y]
     CUR_ORI = [0.0, 0.0, 0.0, 0.0]  # [x, y, z, w]
     CUR_TH = 0.0
     CUR_VEL = [0.0, 0.0]  # [v_linear, w_angular]
 
-    # -- ros param
+    # -- ros node function
+    ## -- parameters
     rospy.init_node('linked_drive')
 
-    map1_frame_id = rospy.get_param(param_name="map1_frame_id", default="map")
-    map2_frame_id = rospy.get_param(param_name="map2_frame_id", default="map")
-    car1_frame_id = rospy.get_param(param_name="car1_frame_id", default="solamr_1/base_footprint")
-    car2_frame_id = rospy.get_param(param_name="car2_frame_id", default="solamr_2/base_footprint")
+    map1_frame_id = rospy.get_param(param_name="~map1_frame_id", default="map")
+    map2_frame_id = rospy.get_param(param_name="~map2_frame_id", default="map")
+    car1_frame_id = rospy.get_param(param_name="~car1_frame_id", default="solamr_1/base_footprint")
+    car2_frame_id = rospy.get_param(param_name="~car2_frame_id", default="solamr_2/base_footprint")
 
-    car1_odom = rospy.get_param(param_name="car1_odom", default="solamr_1/odom")
-    car2_odom = rospy.get_param(param_name="car2_odom", default="solamr_2/odom")
+    car1_odom = rospy.get_param(param_name="~car1_odom", default="solamr_1/odom")
+    car2_odom = rospy.get_param(param_name="~car2_odom", default="solamr_2/odom")
 
-    car1_cmd_vel = rospy.get_param(param_name="car1_cmd_vel", default="solamr_1/cmd_vel")
-    car2_cmd_vel = rospy.get_param(param_name="car2_cmd_vel", default="solamr_2/cmd_vel")
+    car1_cmd_vel = rospy.get_param(param_name="~car1_cmd_vel", default="solamr_1/cmd_vel")
+    car2_cmd_vel = rospy.get_param(param_name="~car2_cmd_vel", default="solamr_2/cmd_vel")
 
-    # -- ros node function
-    rospy.Subscriber(name=car1_odom, data_class=Odometry, callback=_cb_car1_odom)  # for VEL
-    rospy.Subscriber(name=car2_odom, data_class=Odometry, callback=_cb_car2_odom)  # for VEL
+    ## -- pub and sub
+    rospy.Subscriber(name=car1_odom, data_class=Odometry, callback=_cb_car1_odom)  # for FRONT_VEL
+    rospy.Subscriber(name=car2_odom, data_class=Odometry, callback=_cb_car2_odom)  # for CUR_VEL
     PUB_R_VEL = rospy.Publisher(name=car2_cmd_vel, data_class=Twist, queue_size=10)
     PUB_MARKER_ARRAY = MarkerArrPublisher()
 
-    # -- tf listener for POSE, ORI and TH
+    ## -- tf listener for POSE, ORI and TH
     frames = {
         "map1_frame_id": map1_frame_id,
         "map2_frame_id": map2_frame_id,
@@ -495,6 +502,6 @@ if __name__ == '__main__':
     tf_listener = TfListener(frames=frames)
     tf_listener.start_thread()
 
-    # -- linked drive
+    # -- linked drive planner
     linked_drive = LinkedDrive()
     linked_drive.start()
